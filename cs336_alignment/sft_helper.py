@@ -7,9 +7,65 @@ from torch import Tensor
 from torch.utils.data import Dataset
 from transformers import PreTrainedTokenizerBase, PreTrainedModel
 import torch.nn.functional as F
+import pyarrow as pa
 
 
 
+class MATHSFTDataset(Dataset):
+    def __init__(self, data_path: str, tokenizer: PreTrainedTokenizerBase, num_examples: int | None = None):
+        self.examples = []
+        with open(data_path, 'r') as f:
+            for i, line in enumerate(f):
+                if num_examples is not None and i >= num_examples:
+                    break
+                self.examples.append(json.loads(line))
+        self.tokenizer = tokenizer
+    
+    def __len__(self):
+        return len(self.examples)
+    
+    def __getitem__(self, idx):
+        # Return raw strings - tokenization happens in collate
+        item = self.examples[idx] 
+        return item["prompt"], item["solution"] 
+    
+    def collate_fn(self, batch):
+        prompts, responses = zip(*batch)
+        return tokenize_prompt_and_output(
+            list(prompts), list(responses), self.tokenizer
+        )
+
+
+def load_eval_data_for_validation(eval_data_path: str, prompt_template_path: str):
+    """
+    Load evaluation data and format prompts using the same pattern as eval.py.
+    
+    Args:
+        eval_data_path: Path to the Arrow file (e.g., "data/MATH/eval/data-00000-of-00001.arrow")
+        prompt_template_path: Path to prompt template (e.g., "cs336_alignment/prompts/r1_zero.prompt")
+    
+    Returns:
+        prompts: List of formatted prompt strings
+        ground_truths: List of ground truth answers
+    """
+    # Load prompt template (same as eval.py lines 79-82)
+    with open(prompt_template_path, 'r', encoding='utf-8') as f:
+        baseline_prompt = f.read()
+    
+    # Load Arrow file (different from parquet but similar idea)
+    with pa.memory_map(eval_data_path, 'r') as source:
+        table = pa.ipc.open_file(source).read_all()
+    df = table.to_pandas()
+    
+    # Format prompts (same pattern as eval.py lines 110-115)
+    prompts = []
+    ground_truths = []
+    for _, row in df.iterrows():
+        formatted_prompt = baseline_prompt.replace("{question}", row["problem"])
+        prompts.append(formatted_prompt)
+        ground_truths.append(row["answer"])  # Note: "answer" not "solution" for eval data
+    
+    return prompts, ground_truths
 
 def tokenize_prompt_and_output(prompt_strs: list[str], output_strs: list[str], tokenizer: PreTrainedTokenizerBase) -> dict[str, Tensor]: 
     """ Tokenize the prompt and output strings, and construct a mask that is 1 for the response tokens and 0 for
