@@ -12,13 +12,37 @@ import pyarrow as pa
 
 
 class MATHSFTDataset(Dataset):
-    def __init__(self, data_path: str, tokenizer: PreTrainedTokenizerBase, num_examples: int | None = None):
-        self.examples = []
-        with open(data_path, 'r') as f:
-            for i, line in enumerate(f):
-                if num_examples is not None and i >= num_examples:
-                    break
-                self.examples.append(json.loads(line))
+    def __init__(self, data_path: str, tokenizer: PreTrainedTokenizerBase, 
+                 num_examples: int | None = None, prompt_template_path: str | None = None):
+        """
+        Load MATH dataset from Arrow file format.
+        
+        Args:
+            data_path: Path to the Arrow file (e.g., data/MATH/train/data-00000-of-00001.arrow)
+            tokenizer: Tokenizer for the model
+            num_examples: Optional limit on number of examples to load
+            prompt_template_path: Path to prompt template file (optional)
+        """
+        # Load Arrow IPC stream file
+        with open(data_path, 'rb') as f:
+            reader = pa.ipc.open_stream(f)
+            table = reader.read_all()
+        df = table.to_pandas()
+        
+        # Limit examples if specified
+        if num_examples is not None:
+            df = df.head(num_examples)
+        
+        # Load prompt template if provided
+        if prompt_template_path is not None:
+            with open(prompt_template_path, 'r', encoding='utf-8') as f:
+                self.prompt_template = f.read()
+        else:
+            # Default template matching r1_zero format
+            self.prompt_template = "A conversation between User and Assistant. The User asks a question, and the Assistant solves it. The Assistant first thinks about the reasoning process in the mind and then provides the User with the answer. The reasoning process is enclosed within <think> </think> and answer is enclosed within <answer> </answer> tags, respectively, i.e., <think> reasoning process here </think> <answer> answer here </answer>.\nUser: {question}\nAssistant: <think>"
+        
+        # Store examples as list of dicts
+        self.examples = df.to_dict('records')
         self.tokenizer = tokenizer
     
     def __len__(self):
@@ -26,8 +50,11 @@ class MATHSFTDataset(Dataset):
     
     def __getitem__(self, idx):
         # Return raw strings - tokenization happens in collate
-        item = self.examples[idx] 
-        return item["prompt"], item["solution"] 
+        item = self.examples[idx]
+        # Format the prompt using the template
+        prompt = self.prompt_template.replace("{question}", item["problem"])
+        response = item["solution"]
+        return prompt, response
     
     def collate_fn(self, batch):
         prompts, responses = zip(*batch)
@@ -52,9 +79,10 @@ def load_eval_data_for_validation(eval_data_path: str, prompt_template_path: str
     with open(prompt_template_path, 'r', encoding='utf-8') as f:
         baseline_prompt = f.read()
     
-    # Load Arrow file (different from parquet but similar idea)
-    with pa.memory_map(eval_data_path, 'r') as source:
-        table = pa.ipc.open_file(source).read_all()
+    # Load Arrow IPC stream file
+    with open(eval_data_path, 'rb') as f:
+        reader = pa.ipc.open_stream(f)
+        table = reader.read_all()
     df = table.to_pandas()
     
     # Format prompts (same pattern as eval.py lines 110-115)

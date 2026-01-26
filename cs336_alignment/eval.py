@@ -2,7 +2,7 @@
 import json
 import os
 import pandas as pd
-import pyarrow.parquet as pq
+import pyarrow as pa
 from typing import Callable, List
 from cs336_alignment.drgrpo_grader import r1_zero_reward_fn
 from vllm import LLM, SamplingParams
@@ -95,21 +95,19 @@ if __name__ == "__main__":
                 ground_truth.append(json_object["answer"])
     
     elif dataset == "math":
-        # load and format questions with baseline prompt from MATH dataset
-        data_path = os.path.join(os.path.dirname(__file__), "..", "data", "MATH", "train-00000-of-00001-7320a6f3aba8ebd2.parquet")
+        # load and format questions with baseline prompt from MATH eval dataset
+        data_path = os.path.join(os.path.dirname(__file__), "..", "data", "MATH", "eval", "data-00000-of-00001.arrow")
         
-        # Try to load from symlink path, fallback to cache if symlink is broken
-        if not os.path.exists(data_path) or not os.path.isfile(data_path):
-            # Fallback to the actual cache location
-            data_path = os.path.expanduser("~/.cache/huggingface/hub/datasets--qwedsacf--competition_math/blobs/2325458edc03d786939ee9e1e5795efb9e2480247b6e1ed2c51f41bea7369c6a")
-        
-        # Load parquet file
-        df = pq.read_table(data_path).to_pandas()
+        # Load Arrow IPC stream file
+        with open(data_path, 'rb') as f:
+            reader = pa.ipc.open_stream(f)
+            table = reader.read_all()
+        df = table.to_pandas()
         
         # Extract problems and solutions
         for _, row in df.iterrows():
             problem = row["problem"]
-            solution = row["solution"]
+            solution = row["answer"]  # eval dataset uses "answer" field
             formatted_prompt = baseline_prompt.replace("{question}", problem)
             prompts.append(formatted_prompt)
             ground_truth.append(solution)

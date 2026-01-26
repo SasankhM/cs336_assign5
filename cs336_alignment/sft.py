@@ -68,20 +68,23 @@ def train_model(num_examples: int | None,
                 batch_size: int,
                 gradient_accumulation_steps: int,
                 num_epochs: int,
-                eval_every: int,
                 output_dir: str,
                 device: str):
     
-    # Initialize wandb
+    # Initialize wandb with informative run name
+    num_examples_str = str(num_examples) if num_examples is not None else "full"
+    run_name = f"sft_n{num_examples_str}_lr{lr}_bs{batch_size}x{gradient_accumulation_steps}_ep{num_epochs}"
+    
     wandb.init(
         project="sft-math",
+        name=run_name,
         config={
             "num_examples": num_examples,
             "lr": lr,
             "batch_size": batch_size,
             "gradient_accumulation_steps": gradient_accumulation_steps,
+            "effective_batch_size": batch_size * gradient_accumulation_steps,
             "num_epochs": num_epochs,
-            "eval_every": eval_every,
         }
     )
     
@@ -103,7 +106,10 @@ def train_model(num_examples: int | None,
     optimizer = optim.AdamW(model.parameters(), lr=lr)
     tokenizer = AutoTokenizer.from_pretrained("/data/a5-alignment/models/Qwen2.5-Math-1.5B")
 
-    train_dataset = MATHSFTDataset("data/MATH/train-00000-of-00001-7320a6f3aba8ebd2.parquet", tokenizer, num_examples)
+    # Load training dataset from Arrow file
+    train_data_path = "data/MATH/train/data-00000-of-00001.arrow"
+    prompt_template_path = "cs336_alignment/prompts/r1_zero.prompt"
+    train_dataset = MATHSFTDataset(train_data_path, tokenizer, num_examples, prompt_template_path)
 
     train_dataloader = DataLoader(
         train_dataset, 
@@ -128,8 +134,10 @@ def train_model(num_examples: int | None,
     # Training loop with global step tracking
     global_step = 0
     eval_step = 0
+    optimizer.zero_grad()  # Clear any stale gradients
     
     for epoch in range(num_epochs):
+        model.train()  # Ensure model is in training mode at start of each epoch
         for idx, train_batch in enumerate(tqdm(train_dataloader, desc=f"Epoch {epoch+1}/{num_epochs}")):
             input_ids = train_batch["input_ids"].to(device)
             labels = train_batch["labels"].to(device)
@@ -158,28 +166,28 @@ def train_model(num_examples: int | None,
                     "train_step": global_step,
                 })
 
-                # Evaluate periodically
-                if global_step % eval_every == 0:
-                    accuracy, eval_metrics = validate_one_epoch(
-                        model, 
-                        llm, 
-                        eval_prompts, 
-                        eval_ground_truths,
-                        sampling_params, 
-                        r1_zero_reward_fn,
-                        generations_log_path,
-                        global_step
-                    )
-                    eval_step += 1
-                    
-                    # Log eval metrics
-                    wandb.log({
-                        "eval/accuracy": accuracy,
-                        "eval/avg_reward": eval_metrics["avg_reward"],
-                        "eval_step": eval_step,
-                    })
-                    
-                    print(f"Step {global_step} - Validation accuracy: {accuracy:.4f}")
+        # Evaluate at end of each epoch
+        print(f"Epoch {epoch+1} complete. Running validation...")
+        accuracy, eval_metrics = validate_one_epoch(
+            model, 
+            llm, 
+            eval_prompts, 
+            eval_ground_truths,
+            sampling_params, 
+            r1_zero_reward_fn,
+            generations_log_path,
+            global_step
+        )
+        eval_step += 1
+        
+        # Log eval metrics
+        wandb.log({
+            "eval/accuracy": accuracy,
+            "eval/avg_reward": eval_metrics["avg_reward"],
+            "eval_step": eval_step,
+        })
+        
+        print(f"Epoch {epoch+1} - Validation accuracy: {accuracy:.4f}")
 
     # Save final model
     model.save_pretrained(save_directory=output_dir)
@@ -246,6 +254,9 @@ def validate_one_epoch(model, llm, prompts, ground_truths, sampling_params, rewa
     avg_response_length_correct = sum(response_lengths_correct) / len(response_lengths_correct) if response_lengths_correct else 0
     avg_response_length_incorrect = sum(response_lengths_incorrect) / len(response_lengths_incorrect) if response_lengths_incorrect else 0
     
+    # Restore training mode
+    model.train()
+    
     # Log generations using the helper function
     log_generations(
         prompts=prompts,
@@ -277,16 +288,14 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="SFT training on MATH dataset")
     parser.add_argument("--num_examples", type=int, default=None, 
                         help="Number of training examples (None for full dataset)")
-    parser.add_argument("--lr", type=float, default=1e-5, 
+    parser.add_argument("--lr", type=float, default=1e-6, 
                         help="Learning rate")
     parser.add_argument("--batch_size", type=int, default=4, 
                         help="Batch size per device")
-    parser.add_argument("--gradient_accumulation_steps", type=int, default=4, 
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=8, 
                         help="Number of gradient accumulation steps")
-    parser.add_argument("--num_epochs", type=int, default=3, 
+    parser.add_argument("--num_epochs", type=int, default=5, 
                         help="Number of training epochs")
-    parser.add_argument("--eval_every", type=int, default=100, 
-                        help="Evaluate every N global steps")
     parser.add_argument("--output_dir", type=str, default="results/sft/", 
                         help="Output directory for model and logs")
     args = parser.parse_args()
@@ -297,7 +306,6 @@ if __name__ == "__main__":
         batch_size=args.batch_size,
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         num_epochs=args.num_epochs,
-        eval_every=args.eval_every,
         output_dir=args.output_dir,
         device="cuda:0"
     )
